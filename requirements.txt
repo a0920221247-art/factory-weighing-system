@@ -1,5 +1,4 @@
 streamlit
 pandas
 pyserial
-sqlalchemy
-sqlite3
+SQLAlchemy
