@@ -3,8 +3,8 @@ import pandas as pd
 from datetime import datetime
 import os
 import time
-import sqlite3 #將CSV檔案轉成SQL DATABASE
-import serial #用來建立磅秤讀取函數
+import sqlite3
+
 # ==========================================
 # 1. 系統設定
 # ==========================================
@@ -19,62 +19,28 @@ LOG_COLUMNS = ["時間", "產線", "工單號", "產品ID", "實測重", "判定
 PRODUCTION_LINES = ["Line 1", "Line 2", "Line 3", "Line 4"]
 
 st.set_page_config(page_title="產線秤重系統 v13.30 (SQL 整合版)", layout="wide")
-#實際磅秤讀數測試
-def get_real_weight(port='COM3', baudrate=9600):
-    """
-    從指定的序列埠讀取磅秤數值。
-    注意：實際的通訊協定（如指令 $W、結束字元 \n）需視磅秤品牌而定。
-    """
-    try:
-        # 開啟序列埠
-        ser = serial.Serial(port, baudrate, timeout=0.1)
-        # 讀取一行數據
-        line = ser.readline().decode('ascii').strip()
-        ser.close()
-        
-        # 假設磅秤傳回字串如 "ST,GS,+0010.5kg"
-        # 這裡需要用正規表達式或字串處理取出數字 10.5
-        import re
-        weight_match = re.search(r"[-+]?\d*\.\d+|\d+", line)
-        return float(weight_match.group()) if weight_match else None
-    except Exception:
-        return None
 # ==========================================
 # 新增：SQL 資料庫轉換邏輯
 # ==========================================
 def export_to_sql():
-    """純淨優化版：保留原始 NULL 並強化 SQL 結構"""
+    """將目前的 Session 資料轉換為 SQLite 資料庫檔案"""
     try:
-        # 1. 建立連接
         conn = sqlite3.connect(SQL_DB_NAME)
-        cursor = conn.cursor()
-        
-        # ---------------------------------------------------------
-        # 步驟 A: 產品資料表 (Products) - 保留原始空值
-        # ---------------------------------------------------------
+        # 1. 轉換產品資料表 (直接寫入，不需重複處理，因為 load_data 已經弄好了)
         if not st.session_state.products_db.empty:
-            # 直接寫入，不進行字串替換，Pandas 的 NaN 會自動轉為 SQL 的 NULL
             st.session_state.products_db.to_sql("products", conn, if_exists='replace', index=False)
-            # 建立索引：大幅提升產品查詢與關聯速度
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_p_id ON products (產品ID);")
-
-        # ---------------------------------------------------------
-        # 步驟 B: 工單資料表 (Work Orders) - 標準化日期
-        # ---------------------------------------------------------
+            
+        # 2. 轉換工單資料表
         if not st.session_state.work_orders_db.empty:
-            wo_df = st.session_state.work_orders_db.copy()
-            if "建立時間" in wo_df.columns:
-                # 僅優化日期格式，使其符合 SQLite 的標準時間字串 (ISO 8601)
-                wo_df["建立時間"] = pd.to_datetime(wo_df["建立時間"]).dt.strftime('%Y-%m-%d %H:%M:%S')
-            wo_df.to_sql("work_orders", conn, if_exists='replace', index=False)
-
-        # ---------------------------------------------------------
-        # 步驟 C: 生產日誌 (Production Logs) - 效能強化
-        # ---------------------------------------------------------
+            wo_to_save = st.session_state.work_orders_db.copy()
+            if "建立時間" in wo_to_save.columns:
+                wo_to_save["建立時間"] = pd.to_datetime(wo_to_save["建立時間"]).dt.strftime('%Y-%m-%d %H:%M:%S')
+            wo_to_save.to_sql("work_orders", conn, if_exists='replace', index=False)
+            
+        # 3. 轉換生產日誌資料表
         if not st.session_state.production_logs.empty:
             st.session_state.production_logs.to_sql("production_logs", conn, if_exists='replace', index=False)
-            # 建立時間索引：對產量統計報表至關重要
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_l_time ON production_logs (時間);")
+            
         conn.commit()
         conn.close()
         return True
@@ -240,6 +206,8 @@ def load_data():
     
     if not st.session_state.products_db.empty:
         st.session_state.products_db["溫度等級"] = st.session_state.products_db["溫度等級"].astype(str)
+        cols = ["備註1", "備註2", "備註3"]
+        st.session_state.products_db[cols] = st.session_state.products_db[cols].fillna("NULL").replace(['', 'nan', 'None'], 'NULL')
 
     if 'work_orders_db' not in st.session_state:
         st.session_state.work_orders_db = pd.DataFrame()
@@ -265,7 +233,11 @@ def load_data():
             try: st.session_state.production_logs = pd.read_csv(FILE_LOGS)
             except: pass
         if st.session_state.production_logs.empty:
-            st.session_state.production_logs = pd.DataFrame(columns=LOG_COLUMNS)   
+            st.session_state.production_logs = pd.DataFrame(columns=LOG_COLUMNS)
+    
+    if "產線" not in st.session_state.production_logs.columns: st.session_state.production_logs["產線"] = "Line 1"
+    for col in LOG_COLUMNS:
+        if col not in st.session_state.production_logs.columns: st.session_state.production_logs[col] = "NULL"
     st.session_state.production_logs = st.session_state.production_logs[LOG_COLUMNS]
 
 def save_data():
@@ -428,6 +400,8 @@ if menu == "後台：系統管理中心":
                                 st.session_state.products_db = pd.concat([st.session_state.products_db, new_data], ignore_index=True)
                                 saved += 1
                         if saved > 0:
+                            cols = ["備註1", "備註2", "備註3"]
+                            st.session_state.products_db[cols] = st.session_state.products_db[cols].fillna("NULL").replace(['', 'nan', 'None'], 'NULL')
                             save_data()
                             st.toast(f"✅ 匯入 {saved} 筆成功！"); st.session_state.editor_df_clean = pd.DataFrame({"長": [0], "寬": [0], "高": [0], "下限": [0.0], "準重": [0.0], "上限": [0.0], "備註1": [""], "備註2": [""], "備註3": [""]}); st.rerun()
 
@@ -762,23 +736,7 @@ elif menu == "現場：產線秤重作業":
                         st.markdown(usc_html, unsafe_allow_html=True)
 
                     with col_right:
-                        # --- 1. 加入讀取按鈕 ---
-                        if st.button("🔄 讀取磅秤數值", key=f"get_w_{line_name}", use_container_width=True):
-                            weight_val = get_real_weight()
-                            if weight_val is not None:
-                                # 將讀取到的值存入 session_state
-                                st.session_state[f"val_{line_name}"] = weight_val
-                            else:
-                                st.error("❌ 找不到磅秤，請檢查 COM3 連線")
-
-                        # --- 2. 獲取當前數值 (優先從 session 取，沒有就用標準重) ---
-                        current_val = st.session_state.get(f"val_{line_name}", std)
-
-                        # --- 3. 顯示數值輸入框 (取代原本的 slider) ---
-                        val = st.number_input(f"⚖️ {line_name} 實測重量 (kg)", 
-                                              value=float(current_val), 
-                                              format="%.3f",
-                                              key=f"input_{line_name}")
+                        val = st.slider(f"⚖️ {line_name} 秤重模擬", low*0.8, high*1.2, std, 0.1, key=f"slider_{line_name}")
                         
                         is_pass = low <= val <= high
                         is_ng_valid = 10.0 <= val <= 10.5
