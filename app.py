@@ -1,10 +1,60 @@
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 import pandas as pd
+import random
 from datetime import datetime
 import os
 import time
 import sqlite3
+import serial
+import threading
+from streamlit.runtime.scriptrunner import get_script_run_ctx
+# --- 1. 使用 cache_resource 確保 shared_data 永遠是同一個實例 ---
+@st.cache_resource
+def get_shared_data():
+    class ScaleData:
+        def __init__(self):
+            self.weight = 0.0
+            self.last_update = 0
+            self.error = None
+    return ScaleData()
+shared_data = get_shared_data()
+try:
+    from streamlit.runtime.scriptrunner import add_script_run_context
+except ImportError:
+    try:
+        from streamlit.runtime.scriptrunner.script_run_context import add_script_run_context
+    except ImportError:
+        # 如果都找不到，定義一個空的 dummy 函式避免 NameError
+        def add_script_run_context(thread):
+            pass
 
+from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+# ==========================================
+# 模擬磅秤執行緒 (測試與開發用)
+# ==========================================
+
+
+def scale_reader_thread():
+    while True:
+        try:
+            # 直接更新快取中的對象屬性
+            shared_data.weight = round(random.uniform(9.0, 14.0), 1)
+            shared_data.last_update = time.time()
+            time.sleep(1)
+        except Exception as e:
+            shared_data.error = str(e)
+            break
+# 初始化 session_state 變數
+if 'rs232_weight' not in st.session_state:
+    st.session_state.rs232_weight = 0.0
+
+# 啟動背景執行緒 (只啟動一次)
+if "thread_started" not in st.session_state:
+    thread = threading.Thread(target=scale_reader_thread, daemon=True)
+    thread.start()
+    st.session_state.thread_started = True
 # ==========================================
 # 1. 系統設定
 # ==========================================
@@ -285,13 +335,13 @@ with st.sidebar:
     st.divider()
     
     # 原有的儲存按鈕
-    if st.button("💾 強制儲存資料 (CSV)", type="primary", use_container_width=True):
+    if st.button("💾 強制儲存資料 (CSV)", type="primary", width="stretch"):
         st.session_state.work_orders_db = normalize_sequences(st.session_state.work_orders_db)
         save_data()
         st.toast("✅ 資料已同步至 CSV 檔案！")
 
     # --- 新增：SQL 生成按鈕 ---
-    if st.button("🗄️ 生成 SQL 資料庫 (.db)", type="secondary", use_container_width=True):
+    if st.button("🗄️ 生成 SQL 資料庫 (.db)", type="secondary", width="stretch"):
         with st.spinner("正在生成資料庫..."):
             if export_to_sql():
                 st.success(f"✅ 已成功生成 {SQL_DB_NAME}")
@@ -341,7 +391,7 @@ if menu == "後台：系統管理中心":
             with col_t1:
                 st.markdown("##### 規格輸入")
             with col_t2:
-                if st.button("🗑️ 重置表格", type="primary", use_container_width=True):
+                if st.button("🗑️ 重置表格", type="primary", width="stretch"):
                     st.session_state.editor_df_clean = pd.DataFrame({"長": [0], "寬": [0], "高": [0], "下限": [0.0], "準重": [0.0], "上限": [0.0], "備註1": [""], "備註2": [""], "備註3": [""]})
                     st.rerun()
 
@@ -354,12 +404,12 @@ if menu == "後台：系統管理中心":
             st.session_state.editor_df_clean.index = range(1, len(st.session_state.editor_df_clean) + 1)
             
             # 使用固定行數，移除自動的灰色列
-            edited_df = st.data_editor(st.session_state.editor_df_clean, num_rows="fixed", use_container_width=True, column_config=column_cfg, key="data_editor")
+            edited_df = st.data_editor(st.session_state.editor_df_clean, num_rows="fixed", width="stretch", column_config=column_cfg, key="data_editor")
             
             # 【按鈕增加列】
             col_add, col_spacer = st.columns([1, 4])
             with col_add:
-                if st.button("➕ 增加 1 列", type="primary", use_container_width=True):
+                if st.button("➕ 增加 1 列", type="primary", width="stretch"):
                     current_data = edited_df
                     new_row = pd.DataFrame({"長": [0], "寬": [0], "高": [0], "下限": [0.0], "準重": [0.0], "上限": [0.0], "備註1": [""], "備註2": [""], "備註3": [""]})
                     st.session_state.editor_df_clean = pd.concat([current_data, new_row], ignore_index=True)
@@ -370,7 +420,7 @@ if menu == "後台：系統管理中心":
             col_btn1, col_btn2 = st.columns([1, 3])
             
             with col_btn1:
-                if st.button("🔄 計算重量", type="primary", use_container_width=True):
+                if st.button("🔄 計算重量", type="primary", width="stretch"):
                     calc_df = edited_df.reset_index(drop=True)
                     for index, row in calc_df.iterrows():
                         if is_special:
@@ -388,7 +438,7 @@ if menu == "後台：系統管理中心":
                     st.rerun()
 
             with col_btn2:
-                if st.button("💾 確認寫入資料庫", type="primary", use_container_width=True):
+                if st.button("💾 確認寫入資料庫", type="primary", width="stretch"):
                     final_df = edited_df.reset_index(drop=True)
                     saved = 0
                     if not batch_variety: st.error("❌ 請選擇品種")
@@ -428,7 +478,7 @@ if menu == "後台：系統管理中心":
             cols_to_show_db = ["刪除", "客戶名", "溫度等級", "品種", "密度", "長", "寬", "高", "下限", "準重", "上限", "備註1", "備註2", "備註3"]
             edited_db = st.data_editor(
                 db_disp[cols_to_show_db], 
-                use_container_width=True, 
+                width="stretch", 
                 column_config={
                     "刪除": st.column_config.CheckboxColumn(width="small"), 
                     "溫度等級": st.column_config.TextColumn(),
@@ -441,7 +491,7 @@ if menu == "後台：系統管理中心":
             with c_del:
                 st.write("") 
                 st.write("")
-                if st.button("🗑️ 刪除選取資料", type="primary", use_container_width=True):
+                if st.button("🗑️ 刪除選取資料", type="primary", width="stretch"):
                     selected_rows = edited_db[edited_db["刪除"] == True]
                     if not selected_rows.empty:
                         ids_to_remove = db_disp.loc[selected_rows.index, "產品ID"].tolist()
@@ -466,7 +516,7 @@ if menu == "後台：系統管理中心":
                 ])
                 with cols[i]:
                     label = f"📍 {line}\n\n待生產: {pending_count} 筆"
-                    if st.button(label, key=f"btn_sel_{line}", use_container_width=True, type="primary"):
+                    if st.button(label, key=f"btn_sel_{line}", width="stretch", type="primary"):
                         st.session_state.admin_line_choice = line
                         st.rerun()
         
@@ -537,11 +587,11 @@ if menu == "後台：系統管理中心":
                         "備註2": st.column_config.TextColumn(disabled=True),
                         "備註3": st.column_config.TextColumn(disabled=True),
                     },
-                    use_container_width=True
+                    width="stretch"
                 )
                 
                 st.write("")
-                if st.button(f"⬇️ 確認加入至 {target_line} 的排程", type="primary", use_container_width=True):
+                if st.button(f"⬇️ 確認加入至 {target_line} 的排程", type="primary", width="stretch"):
                     items_index = edited_selection[edited_selection["📝 排程數量"] > 0].index
                     if not items_index.empty:
                         global_count = len(st.session_state.work_orders_db)
@@ -603,7 +653,7 @@ if menu == "後台：系統管理中心":
 
                 col_q1, col_q2 = st.columns([4, 1])
                 with col_q1:
-                    edited_queue = st.data_editor(display_df, hide_index=True, use_container_width=True, key=f"q_editor_{target_line}",
+                    edited_queue = st.data_editor(display_df, hide_index=True, width="stretch", key=f"q_editor_{target_line}",
                         column_config={
                             "刪除": st.column_config.CheckboxColumn(width="small"), 
                             "排序": st.column_config.NumberColumn(width="small", min_value=1, format="%d"),
@@ -616,13 +666,13 @@ if menu == "後台：系統管理中心":
                             "已完成": st.column_config.NumberColumn(disabled=True, format="%d")
                         })
                 with col_q2:
-                    if st.button(f"🔄 更新排序", type="primary", use_container_width=True, key=f"btn_upd_{target_line}"):
+                    if st.button(f"🔄 更新排序", type="primary", width="stretch", key=f"btn_upd_{target_line}"):
                         for db_idx, row in edited_queue.iterrows():
                             st.session_state.work_orders_db.at[db_idx, "排程順序"] = row["排序"]
                         st.session_state.work_orders_db = normalize_sequences(st.session_state.work_orders_db)
                         save_data(); st.toast(f"✅ {target_line} 排序已更新"); time.sleep(1); st.rerun()
                     st.write("")
-                    if st.button(f"🗑️ 移除選中", type="primary", use_container_width=True, key=f"btn_del_{target_line}"):
+                    if st.button(f"🗑️ 移除選中", type="primary", width="stretch", key=f"btn_del_{target_line}"):
                         indices_to_remove = edited_queue[edited_queue["刪除"] == True].index.tolist()
                         if indices_to_remove:
                             st.session_state.work_orders_db = st.session_state.work_orders_db.drop(indices_to_remove)
@@ -633,7 +683,11 @@ if menu == "後台：系統管理中心":
 # ==========================================
 # 功能 C: 現場秤重
 # ==========================================
+
 elif menu == "現場：產線秤重作業":
+    # 每 1000 毫秒 (1秒) 自動刷新一次網頁，確保抓到最新模擬重量
+    from streamlit_autorefresh import st_autorefresh
+    st_autorefresh(interval=1000, key="weight_refresh")
     st.write("### 🏭 現場作業儀表板")
     op_tabs = st.tabs(PRODUCTION_LINES)
     
@@ -688,7 +742,7 @@ elif menu == "現場：產線秤重作業":
                     with col_finish_btn:
                         st.write("") 
                         st.write("") 
-                        if st.button("🏁 結束當前工單", type="primary", use_container_width=True, key=f"fin_{line_name}"):
+                        if st.button("🏁 結束當前工單", type="primary", width="stretch", key=f"fin_{line_name}"):
                             idx = st.session_state.work_orders_db[st.session_state.work_orders_db["工單號碼"] == curr["工單號碼"]].index[0]
                             st.session_state.work_orders_db.at[idx, "狀態"] = "已完成"
                             st.session_state.work_orders_db = normalize_sequences(st.session_state.work_orders_db)
@@ -698,7 +752,7 @@ elif menu == "現場：產線秤重作業":
 
                     def highlight_current(s):
                         return ['background-color: #d4e6f1' if str(s["客戶"]) in str(curr["顯示內容"]) else '' for v in s]
-                    st.dataframe(q_df.style.apply(highlight_current, axis=1), use_container_width=True, hide_index=True)
+                    st.dataframe(q_df.style.apply(highlight_current, axis=1), width="stretch", hide_index=True)
                     st.divider()
 
                     try:
@@ -734,122 +788,165 @@ elif menu == "現場：產線秤重作業":
 </div>
 """
                         st.markdown(usc_html, unsafe_allow_html=True)
-
+                    # 修改後的秤重區塊
+                    # --- 找到 with col_right: 之後的部分並替換 ---
                     with col_right:
-                        val = st.slider(f"⚖️ {line_name} 秤重模擬", low*0.8, high*1.2, std, 0.1, key=f"slider_{line_name}")
-                        
+                    # 1. 先定義函數 (讓下方的按鈕可以找到它)
+                        def do_pass(c, v, ln):
+                            idx = st.session_state.work_orders_db[st.session_state.work_orders_db["工單號碼"] == c["工單號碼"]].index[0]
+                            st.session_state.work_orders_db.at[idx, "已完成數量"] += 1
+                            st.session_state.work_orders_db.at[idx, "狀態"] = "生產中"
+                            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            new_log_data = [current_time, ln, c["工單號碼"], c["產品ID"], v, "PASS", ""]
+                            new_log = pd.DataFrame([new_log_data], columns=LOG_COLUMNS)
+                            st.session_state.production_logs = pd.concat([st.session_state.production_logs, new_log], ignore_index=True)
+                            save_data()
+                            export_to_sql()
+                            st.toast(f"✅ {ln} 良品紀錄成功: {v} kg")
+
+                        def do_ng(c, v, ln):
+                            reason = st.session_state.get(f"ng_sel_{ln}", "其他")
+                            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            new_log_data = [current_time, ln, c["工單號碼"], c["產品ID"], v, "NG", reason]
+                            new_log = pd.DataFrame([new_log_data], columns=LOG_COLUMNS)
+                            st.session_state.production_logs = pd.concat([st.session_state.production_logs, new_log], ignore_index=True)
+                            save_data()
+                            export_to_sql()
+                            st.toast(f"🔴 {ln} NG 紀錄成功: {v} kg")
+
+                        # 2. 模式切換邏輯
+                        use_auto_scale = st.toggle("🔌 連接實體磅秤 (模擬模式中)", value=True, key=f"auto_{line_name}")
+                        val = shared_data.weight
+                        last_ts = shared_data.last_update
+                        err = shared_data.error
+                      
+                        if use_auto_scale:
+                            if last_ts > 0:
+                                update_str = datetime.fromtimestamp(last_ts).strftime('%H:%M:%S')
+                                st.info(f"🛰️ 磅秤連線中... 實測重量: {val} kg (最後同步: {update_str})")
+                        else:
+                                st.warning("⚠️ 數據尚未寫入。")
+                                
+                        if err:
+                                st.error(f"執行緒錯誤: {err}")
+
+                        if st.button("🔄 刷新當前數值", key=f"ref_{line_name}"):
+                                st.rerun()
+                        else:
+                            val = st.slider(f"⚖️ {line_name} 手動輸入", low*0.8, high*1.2, std, 0.1, key=f"slider_{line_name}")
+
+                        # 3. 判定與顯示 (確保 status_cls 在這裡定義)
                         is_pass = low <= val <= high
-                        is_ng_valid = 10.0 <= val <= 10.5
+                        is_ng_valid = 10.0 <= val <= 10.5 
+
                         status_cls = "status-pass" if is_pass else ("status-ng-ready" if is_ng_valid else "status-fail")
                         rem_qty = curr['預計數量'] - curr['已完成數量']
                         over_cls = "over-prod" if rem_qty < 0 else ""
-                        
+
+                        # 顯示儀表板
                         st.markdown(f"""
-                        <div class="status-container {status_cls}">
-                            <div class="countdown-box"><span class="countdown-label">剩餘數量</span><div class="countdown-val {over_cls}">{int(rem_qty)}</div></div>
-                            <div class="weight-display digital-font">{val:.1f}</div>
-                        </div>""", unsafe_allow_html=True)
+                            <div class="status-container {status_cls}">
+                                <div class="countdown-box"><span class="countdown-label">剩餘數量</span><div class="countdown-val {over_cls}">{int(rem_qty)}</div></div>
+                                <div class="weight-display digital-font">{val:.1f}</div>
+                            </div>""", unsafe_allow_html=True)
+
                         st.markdown("###")
+
+                        # 4. 按鈕區 (現在 do_pass 已定義，不會報錯)
                         b_l, b_r = st.columns([3, 1])
-                        
                         with b_l:
-                            def do_pass(c=curr, v=val, ln=line_name):
-                                idx = st.session_state.work_orders_db[st.session_state.work_orders_db["工單號碼"] == c["工單號碼"]].index[0]
-                                st.session_state.work_orders_db.at[idx, "已完成數量"] += 1
-                                st.session_state.work_orders_db.at[idx, "狀態"] = "生產中"
-                                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                # 儲存為 2024-01-06 14:30:05，這樣 SQL 才能進行日期篩選
-                                new_log_data = [current_time, ln, c["工單號碼"], c["產品ID"], v, "PASS", ""]
-                                new_log = pd.DataFrame([new_log_data], columns=LOG_COLUMNS)
-                                st.session_state.production_logs = pd.concat([st.session_state.production_logs, new_log], ignore_index=True)
-                                save_data(); st.toast(f"✅ {ln} 良品紀錄: {v} kg")
-                            st.button("🟢 紀錄良品 (PASS)", disabled=not is_pass, type="primary", use_container_width=True, on_click=do_pass, key=f"btn_pass_{line_name}")
+                            st.button("🟢 紀錄良品 (PASS)", 
+                                      disabled=not is_pass, 
+                                      type="primary", 
+                                      width="stretch", 
+                                      on_click=do_pass, 
+                                      args=(curr, val, line_name), 
+                                      key=f"btn_pass_{line_name}")
 
                         with b_r:
-                            def do_ng(c=curr, v=val, ln=line_name):
-                                r = st.session_state.get(f"ng_sel_{ln}", "其他")
-                                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                new_log_data = [current_time, ln, c["工單號碼"], c["產品ID"], v, "NG", r]
-                                new_log = pd.DataFrame([new_log_data], columns=LOG_COLUMNS)
-                                st.session_state.production_logs = pd.concat([st.session_state.production_logs, new_log], ignore_index=True)
-                                save_data(); st.toast(f"🔴 {ln} NG紀錄: {v} kg")
-                            st.button("🔴 紀錄 NG", disabled=not is_ng_valid, type="primary", use_container_width=True, on_click=do_ng, key=f"btn_ng_{line_name}")
-                        
+                            st.button("🔴 紀錄 NG", 
+                                      disabled=not is_ng_valid, 
+                                      type="primary", 
+                                      width="stretch", 
+                                      on_click=do_ng, 
+                                      args=(curr, val, line_name),
+                                      key=f"btn_ng_{line_name}")
+
                         if is_ng_valid:
                             st.selectbox("NG 原因", ["不足重尾數", "規格切換廢料", "外觀不良", "其他"], key=f"ng_sel_{line_name}")
 
-                    st.divider()
-                    h_l, h_r = st.columns(2)
-                    
-                    # [v13.29 修改] 顯示全產線紀錄 (不隨工單清空)
-                    line_logs = st.session_state.production_logs[st.session_state.production_logs["產線"] == line_name]
-                    
-                    # 良品統計
-                    pass_all = line_logs[line_logs["判定結果"] == "PASS"]
-                    total_weight = 0.0
-                    if not pass_all.empty:
-                         wo_map = st.session_state.work_orders_db.set_index("工單號碼")["準重"].to_dict()
-                         for _, row in pass_all.iterrows():
-                             w_std = wo_map.get(row["工單號"], 0)
-                             total_weight += float(w_std)
-
-                    # NG 統計
-                    ng_all = line_logs[line_logs["判定結果"] == "NG"]
-                    total_ng = len(ng_all)
-
-                    with h_l:
-                        st.markdown(f'<div class="history-header">✅ 良品紀錄 (累計: {total_weight:.1f} kg)</div>', unsafe_allow_html=True)
-                        # 使用全產線紀錄
-                        c_logs = line_logs
-                        
-                        if not c_logs.empty: 
-                            pass_df = c_logs[c_logs["判定結果"]=="PASS"].copy()
-                            if not pass_df.empty:
-                                pass_df = pass_df.reset_index(drop=True)
-                                pass_df["序號"] = range(1, len(pass_df) + 1)
-                                display_cols = ["序號", "時間", "實測重"]
-                                st.dataframe(
-                                    pass_df[display_cols].sort_index(ascending=False), 
-                                    use_container_width=True, 
-                                    hide_index=True,
-                                    column_config={
-                                        "實測重": st.column_config.NumberColumn(format="%.1f")
-                                    }
-                                )
-                            else: st.info("尚無良品")
-                        else: st.info("尚無生產紀錄")
+                            st.divider()
+                            h_l, h_r = st.columns(2)
                             
-                    with h_r:
-                        st.markdown(f'<div class="history-header">🔴 NG 紀錄 (累計數量: {total_ng})</div>', unsafe_allow_html=True)
-                        if not c_logs.empty: 
-                            ng_df = c_logs[c_logs["判定結果"]=="NG"].copy()
-                            if not ng_df.empty:
-                                ng_df = ng_df.reset_index(drop=True)
-                                ng_df["序號"] = range(1, len(ng_df) + 1)
-                                display_cols = ["序號", "時間", "NG原因"]
-                                st.dataframe(ng_df[display_cols].sort_index(ascending=False), use_container_width=True, hide_index=True)
-                            else: st.info("尚無NG品")
-                        else: st.info("尚無生產紀錄")
-                        
-                        st.markdown("---")
-                        # 撤銷功能：邏輯改為撤銷該產線最新的一筆
-                        def do_undo():
-                            w = st.session_state.production_logs[st.session_state.production_logs["產線"] == line_name]
-                            if not w.empty:
-                                last = w.index[-1]
-                                last_wo = w.loc[last, "工單號"]
-                                # 嘗試回扣工單數量
-                                idx_list = st.session_state.work_orders_db.index[st.session_state.work_orders_db["工單號碼"] == last_wo].tolist()
-                                if idx_list:
-                                    idx = idx_list[0]
-                                    if w.loc[last, "判定結果"] == "PASS":
-                                        if st.session_state.work_orders_db.at[idx, "已完成數量"] > 0:
-                                            st.session_state.work_orders_db.at[idx, "已完成數量"] -= 1
-                                
-                                st.session_state.production_logs = st.session_state.production_logs.drop(last)
-                                save_data(); st.toast("↩️ 已撤銷上一筆紀錄")
-                        
-                        st.button("↩️ 撤銷", type="primary", disabled=c_logs.empty, use_container_width=True, on_click=do_undo, key=f"undo_{line_name}")
+                            # [v13.29 修改] 顯示全產線紀錄 (不隨工單清空)
+                            line_logs = st.session_state.production_logs[st.session_state.production_logs["產線"] == line_name]
+                            
+                            # 良品統計
+                            pass_all = line_logs[line_logs["判定結果"] == "PASS"]
+                            total_weight = 0.0
+                            if not pass_all.empty:
+                                wo_map = st.session_state.work_orders_db.set_index("工單號碼")["準重"].to_dict()
+                                for _, row in pass_all.iterrows():
+                                    w_std = wo_map.get(row["工單號"], 0)
+                                    total_weight += float(w_std)
 
-            else:
-                st.info(f"💤 {line_name} 目前閒置中，請至後台加入排程。")
+                            # NG 統計
+                            ng_all = line_logs[line_logs["判定結果"] == "NG"]
+                            total_ng = len(ng_all)
+
+                            with h_l:
+                                st.markdown(f'<div class="history-header">✅ 良品紀錄 (累計: {total_weight:.1f} kg)</div>', unsafe_allow_html=True)
+                                # 使用全產線紀錄
+                                c_logs = line_logs
+                                
+                                if not c_logs.empty: 
+                                    pass_df = c_logs[c_logs["判定結果"]=="PASS"].copy()
+                                    if not pass_df.empty:
+                                        pass_df = pass_df.reset_index(drop=True)
+                                        pass_df["序號"] = range(1, len(pass_df) + 1)
+                                        display_cols = ["序號", "時間", "實測重"]
+                                        st.dataframe(
+                                            pass_df[display_cols].sort_index(ascending=False), 
+                                            width="stretch", 
+                                            hide_index=True,
+                                            column_config={
+                                                "實測重": st.column_config.NumberColumn(format="%.1f")
+                                            }
+                                        )
+                                    else: st.info("尚無良品")
+                                else: st.info("尚無生產紀錄")
+                                    
+                            with h_r:
+                                st.markdown(f'<div class="history-header">🔴 NG 紀錄 (累計數量: {total_ng})</div>', unsafe_allow_html=True)
+                                if not c_logs.empty: 
+                                    ng_df = c_logs[c_logs["判定結果"]=="NG"].copy()
+                                    if not ng_df.empty:
+                                        ng_df = ng_df.reset_index(drop=True)
+                                        ng_df["序號"] = range(1, len(ng_df) + 1)
+                                        display_cols = ["序號", "時間", "NG原因"]
+                                        st.dataframe(ng_df[display_cols].sort_index(ascending=False), width="stretch", hide_index=True)
+                                    else: st.info("尚無NG品")
+                                else: st.info("尚無生產紀錄")
+                                
+                                st.markdown("---")
+                                # 撤銷功能：邏輯改為撤銷該產線最新的一筆
+                                def do_undo():
+                                    w = st.session_state.production_logs[st.session_state.production_logs["產線"] == line_name]
+                                    if not w.empty:
+                                        last = w.index[-1]
+                                        last_wo = w.loc[last, "工單號"]
+                                        # 嘗試回扣工單數量
+                                        idx_list = st.session_state.work_orders_db.index[st.session_state.work_orders_db["工單號碼"] == last_wo].tolist()
+                                        if idx_list:
+                                            idx = idx_list[0]
+                                            if w.loc[last, "判定結果"] == "PASS":
+                                                if st.session_state.work_orders_db.at[idx, "已完成數量"] > 0:
+                                                    st.session_state.work_orders_db.at[idx, "已完成數量"] -= 1
+                                        
+                                        st.session_state.production_logs = st.session_state.production_logs.drop(last)
+                                        save_data(); st.toast("↩️ 已撤銷上一筆紀錄")
+                            
+                            st.button("↩️ 撤銷", type="primary", disabled=c_logs.empty, width="stretch", on_click=do_undo, key=f"undo_{line_name}")
+
+                else:
+                    st.info(f"💤 {line_name} 目前閒置中，請至後台加入排程。")
